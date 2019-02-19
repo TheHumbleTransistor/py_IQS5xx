@@ -40,32 +40,51 @@ BL_CRC_FAIL = 0x01
 BL_CRC_PASS = 0x00
 BL_VERSION = 0x0200
 
-def write_bytes(self, data):
-    self._bus.write_bytes(self._address, bytes(data))
-i2c.Device.write_bytes = write_bytes
+def swapEndianess(uint16):
+    return ((uint16 & 0xFF) << 8) | ((uint16 & 0xFF00) >> 8)
 
-def read_bytes(self, data):
+def writeBytes(self, data):
+    self._bus.write_bytes(self._address, bytes(data))
+i2c.Device.writeBytes = writeBytes
+
+def readBytes(self, data):
     return self._bus.read_bytes(self._address, data)
-i2c.Device.read_bytes = read_bytes
+i2c.Device.readBytes = readBytes
 
 def writeRawListReadRawList(self, data, readLength):
-    self.write_bytes(data)
+    self.writeBytes(data)
     # This isn't using a repeat start
-    return self.read_bytes(readLength)
+    return self.readBytes(readLength)
 i2c.Device.writeRawListReadRawList = writeRawListReadRawList
 
-def readByte_16BitAddress(self, register):
-    reg = create_string_buffer(struct.pack('>H', register))
-    result = c_uint8()
+def readBytes_16BitAddress(self, address, length):
+    assert self._bus._device is not None, 'Bus must be opened before operations are made against it!'
+    # Build ctypes values to marshall between ioctl and Python.
+    reg = c_uint16(swapEndianess(address))
+    result = create_string_buffer(length)
     # Build ioctl request.
     request = make_i2c_rdwr_data([
-        (self._address, 0, 2, cast(pointer(reg), POINTER(c_uint8))),             # Write cmd register.
-        (self._address, smbus.I2C_M_RD, 1, pointer(result))    # Read 1 byte as result.
+        (self._address, 0, 2, cast(pointer(reg), POINTER(c_uint8))),            # Write cmd register.
+        (self._address, smbus.I2C_M_RD, length, cast(result, POINTER(c_uint8)))   # Read data.
     ])
     # Make ioctl call and return result data.
     ioctl(self._bus._device.fileno(), smbus.I2C_RDWR, request)
-    return result.value
+    return bytearray(result.raw)  # Use .raw instead of .value which will stop at a null byte!
+i2c.Device.readBytes_16BitAddress = readBytes_16BitAddress
+
+def readByte_16BitAddress(self, address):
+    result = self.readBytes_16BitAddress(address, 1)
+    result = struct.unpack('>B', result)[0]
+    return result
 i2c.Device.readByte_16BitAddress = readByte_16BitAddress
+
+def writeByte_16BitAddress(self, address, value, mask=0xFF):
+    register = self.readByte_16BitAddress(address)
+    register &= ~mask
+    register |= (value & mask)
+    bytes = create_string_buffer(struct.pack('>HB', address, register))
+    self.writeBytes(bytes)
+i2c.Device.writeByte_16BitAddress = writeByte_16BitAddress
 
 class IQS5xx(object):
     def __init__(self, resetPin, readyPin, address=IQS5xx_DEFAULT_ADDRESS):
@@ -88,6 +107,8 @@ class IQS5xx(object):
         self._device = i2c.get_i2c_device(value)
         self._logger = logging.getLogger('IQS5xx.Address.{0:#0X}'.format(value))
 
+    # def setupComplete(self):
+    # def setManualControl(self):
 
     def bootloaderAvailable(self):
         BOOTLOADER_AVAILABLE = 0xA5
@@ -159,7 +180,7 @@ class IQS5xx(object):
             data[0] = (blockAddress >> 8) & 0xFF
             data[1] = blockAddress & 0xFF
             data[2:] = appBinary[blockNum*BLOCK_SIZE : (blockNum+1)*BLOCK_SIZE]
-            bootloaderDevice.write_bytes(data)
+            bootloaderDevice.writeBytes(data)
             time.sleep(.010) # give the device time to write to flash
 
         # Step 4 - Write the checksum descriptor section
@@ -169,7 +190,7 @@ class IQS5xx(object):
         data[0] = (blockAddress >> 8) & 0xFF
         data[1] = blockAddress & 0xFF
         data[2:] = crcBinary[0:]
-        bootloaderDevice.write_bytes(data)
+        bootloaderDevice.writeBytes(data)
         time.sleep(0.010) # give the device time to write to flash
 
         # Step 5 - Perform CRC and read back settins section
@@ -232,6 +253,9 @@ class TestIQS5xx(unittest.TestCase):
         if self.__class__.device.address != self.__class__.desiredAddress:
             print("Cleaning up by reprogramming the controller to the default address")
             self.__class__.device.updateFirmware(self.__class__.hexFile, newDeviceAddress=self.__class__.desiredAddress)
+
+    def test_bootloaderAvailable(self):
+        self.assertTrue(self.__class__.device.bootloaderAvailable())
 
     def test_update(self):
         self.__class__.device.updateFirmware(self.__class__.hexFile)
