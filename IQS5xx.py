@@ -14,6 +14,8 @@ import struct
 import Adafruit_PureIO.smbus as smbus
 from Adafruit_PureIO.smbus import make_i2c_rdwr_data
 
+from IQS5xx_Defs import *
+
 
 def bytesToHexString(bytes):
     return ''.join('{:02x} '.format(ord(c)) for c in bytes)
@@ -40,6 +42,8 @@ BL_CRC_FAIL = 0x01
 BL_CRC_PASS = 0x00
 BL_VERSION = 0x0200
 
+
+
 def swapEndianess(uint16):
     return ((uint16 & 0xFF) << 8) | ((uint16 & 0xFF00) >> 8)
 
@@ -56,6 +60,13 @@ def writeRawListReadRawList(self, data, readLength):
     # This isn't using a repeat start
     return self.readBytes(readLength)
 i2c.Device.writeRawListReadRawList = writeRawListReadRawList
+
+def writeBytes_16BitAddress(self, address, data):
+    addressBytes = struct.pack('>H', address)
+    dataBytes = bytearray(data)
+    bytes = addressBytes + dataBytes
+    self.writeBytes(bytes)
+i2c.Device.writeBytes_16BitAddress = writeBytes_16BitAddress
 
 def readBytes_16BitAddress(self, address, length):
     assert self._bus._device is not None, 'Bus must be opened before operations are made against it!'
@@ -79,10 +90,13 @@ def readByte_16BitAddress(self, address):
 i2c.Device.readByte_16BitAddress = readByte_16BitAddress
 
 def writeByte_16BitAddress(self, address, value, mask=0xFF):
-    register = self.readByte_16BitAddress(address)
-    register &= ~mask
-    register |= (value & mask)
-    bytes = create_string_buffer(struct.pack('>HB', address, register))
+    if mask is not 0xFF:
+        register = self.readByte_16BitAddress(address)
+        register &= ~mask
+        register |= (value & mask)
+        value = register
+    format = '>HB' if (value > 0) else '>Hb'
+    bytes = struct.pack(format, address, value)
     self.writeBytes(bytes)
 i2c.Device.writeByte_16BitAddress = writeByte_16BitAddress
 
@@ -92,8 +106,17 @@ class IQS5xx(object):
         self._resetPinNum = resetPin
         self._readyPinNum = readyPin
         self._resetPin = OutputDevice(pin=self._resetPinNum, active_high=False, initial_value=True)
-        self._readypin = DigitalInputDevice(pin=self._readyPinNum, pull_up=True)
+        self._readypin = DigitalInputDevice(pin=self._readyPinNum, active_state=True, pull_up=None)
         self.releaseReset()
+
+    def begin(self):
+        self.waitUntilReady()
+        self.acknowledgeReset()
+        time.sleep(0.01)
+        self.acknowledgeReset()
+        time.sleep(0.01)
+        self.endSession()
+        time.sleep(0.020)
 
     @property
     def address(self):
@@ -107,13 +130,91 @@ class IQS5xx(object):
         self._device = i2c.get_i2c_device(value)
         self._logger = logging.getLogger('IQS5xx.Address.{0:#0X}'.format(value))
 
-    # def setupComplete(self):
-    # def setManualControl(self):
+    def setupComplete(self):
+        self._device.writeByte_16BitAddress(SystemConfig0_adr, SETUP_COMPLETE, SETUP_COMPLETE)
+
+    def setManualControl(self):
+        self._device.writeByte_16BitAddress(SystemConfig0_adr, MANUAL_CONTROL, MANUAL_CONTROL)
+        self._device.writeByte_16BitAddress(SystemControl0_adr, 0x00, 0x07) # active mode
+
+    def setTXPinMappings(self, pinList):
+        assert isinstance(pinList, list), "TX pinList must be a list of integers"
+        assert 0 <= len(pinList) <= 15, "TX pinList must be between 0 and 15 long"
+        self._device.writeBytes_16BitAddress(TxMapping_adr, pinList)
+        self._device.writeByte_16BitAddress(TotalTx_adr, len(pinList))
+
+    def setRXPinMappings(self, pinList):
+        assert isinstance(pinList, list), "RX pinList must be a list of integers"
+        assert 0 <= len(pinList) <= 10, "RX pinList must be between 0 and 15 long"
+        self._device.writeBytes_16BitAddress(RxMapping_adr, pinList)
+        self._device.writeByte_16BitAddress(TotalRx_adr, len(pinList))
+
+    def enableChannel(self, txChannel, rxChannel, enabled):
+        assert 0 <= txChannel < 15, "txChannel must be less than 15"
+        assert 0 <= rxChannel < 10, "rxChannel must be less than 10"
+        registerAddy = ActiveChannels_adr + (txChannel * 2)
+        if rxChannel >= 8:
+            mask = 1 << (rxChannel - 8)
+        else:
+            registerAddy += 1
+            mask = 1 << rxChannel
+
+        value = mask if enabled else 0x00
+        self._device.writeByte_16BitAddress(registerAddy, value)
+
+    def setTXRXChannelCount(self, tx_count, rx_count):
+        assert 0 <= txChannel <= 15, "tx_count must be less or equal tp 15"
+        assert 0 <= rxChannel <= 10, "rx_count must be less than or equal to 10"
+        self._device.writeByte_16BitAddress(TotalTx_adr, txChannel)
+        self._device.writeByte_16BitAddress(TotalRx_adr, rxChannel)
+
+    def swapXY(self, swapped):
+        value = SWITCH_XY_AXIS if swapped else 0x00
+        self._device.writeByte_16BitAddress(XYConfig0_adr, value, SWITCH_XY_AXIS)
+
+    def setAtiGlobalC(self, globalC):
+        self._device.writeByte_16BitAddress(GlobalATIC_adr, globalC)
+
+    def setChannel_ATI_C_Adjustment(self, txChannel, rxChannel, adjustment):
+        assert 0 <= txChannel < 15, "txChannel must be less than 15"
+        assert 0 <= rxChannel < 10, "rxChannel must be less than 10"
+        registerAddy = ATICAdjust_adr + (txChannel * 10) + rxChannel
+        self._device.writeByte_16BitAddress(registerAddy, adjustment)
+
+    def setTouchMultipliers(self, set, clear):
+        self._device.writeByte_16BitAddress(GlobalTouchSet_adr, set)
+        self._device.writeByte_16BitAddress(GlobalTouchClear_adr, clear)
+
+    def rxFloat(self, floatWhenInactive):
+        value = RX_FLOAT if floatWhenInactive else 0x00
+        self._device.writeByte_16BitAddress(HardwareSettingsA_adr, value, RX_FLOAT)
+
+    def runAtiAlgorithm(self):
+        self._device.writeByte_16BitAddress(SystemControl0_adr, AUTO_ATI, AUTO_ATI)
+
+    def acknowledgeReset(self):
+        self._device.writeByte_16BitAddress(SystemControl0_adr, ACK_RESET, ACK_RESET)
+
+    def atiErrorDetected(self):
+        reg = self._device.readByte_16BitAddress(SystemInfo0_adr)
+        return bool(reg & ATI_ERROR)
+
+    def reseed(self):
+        self._device.writeByte_16BitAddress(SystemControl0_adr, RESEED, RESEED)
+
+    def endSession(self):
+        self._device.writeByte_16BitAddress(EndWindow_adr, 0x00)
+        time.sleep(0.001)
+
+    def readVersionNumbers(self):
+        bytes = self._device.readBytes_16BitAddress(ProductNumber_adr, 6)
+        fields = struct.unpack(">HHBB",bytes)
+        return {"product":fields[0], "project":fields[1], "major":fields[2], "minor":fields[3]}
 
     def bootloaderAvailable(self):
         BOOTLOADER_AVAILABLE = 0xA5
         NO_BOOTLOADER = 0xEE
-        result = self._device.readByte_16BitAddress(0x0006)
+        result = self._device.readByte_16BitAddress(BLStatus_adr)
         # result = ord(result)
         if result == BOOTLOADER_AVAILABLE:
             return True
@@ -257,15 +358,17 @@ class TestIQS5xx(unittest.TestCase):
     def test_bootloaderAvailable(self):
         self.assertTrue(self.__class__.device.bootloaderAvailable())
 
-    def test_update(self):
-        self.__class__.device.updateFirmware(self.__class__.hexFile)
-
-    def test_update_and_changeaddress(self):
-        newAddy = 0x77
-        self.__class__.device.updateFirmware(self.__class__.hexFile, newDeviceAddress=newAddy)
-        self.assertEqual(self.__class__.device.address, newAddy)
-        time.sleep(0.1)
-        self.assertTrue(self.__class__.device.bootloaderAvailable())
+    # @unittest.skip
+    # def test_update(self):
+    #     self.__class__.device.updateFirmware(self.__class__.hexFile)
+    #
+    # @unittest.skip
+    # def test_update_and_changeaddress(self):
+    #     newAddy = 0x77
+    #     self.__class__.device.updateFirmware(self.__class__.hexFile, newDeviceAddress=newAddy)
+    #     self.assertEqual(self.__class__.device.address, newAddy)
+    #     time.sleep(0.1)
+    #     self.assertTrue(self.__class__.device.bootloaderAvailable())
 
 
 if __name__ == '__main__':
