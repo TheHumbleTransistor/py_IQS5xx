@@ -130,6 +130,9 @@ class IQS5xx(object):
         self._device = i2c.get_i2c_device(value)
         self._logger = logging.getLogger('IQS5xx.Address.{0:#0X}'.format(value))
 
+    def readUniqueID(self):
+        return bytesToHexString(self._device.readBytes_16BitAddress(0xF000, 12))
+
     def setupComplete(self):
         self._device.writeByte_16BitAddress(SystemConfig0_adr, SETUP_COMPLETE, SETUP_COMPLETE)
 

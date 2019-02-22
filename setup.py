@@ -1,7 +1,7 @@
 from setuptools import setup
 
 setup(name='IQS5xx',
-      version='1.0.0',
+      version='1.0.1',
       description='Python code for programming and controlling Azoteq\'s IQS5xx series of capacitive touch controllers',
       url='https://github.com/TheHumbleTransistor/py_IQS5xx',
       author='Ray Kampmeier',
