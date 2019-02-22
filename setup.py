@@ -11,7 +11,10 @@ setup(name='IQS5xx',
       include_package_data=True,
       zip_safe=False,
       install_requires=[
-          'usb_iss~=0.3.1',
-          'pyserial==3.4'
+          'intelhex~=2.2.1',
+          'gpiozero~=1.5.0',
+          'Adafruit_GPIO~=1.0.3',
+          'Adafruit-PureIO~=0.2.3',
+          'pyserial~=3.4'
       ]
       )
