@@ -18,7 +18,11 @@ from IQS5xx_Defs import *
 
 
 def bytesToHexString(bytes):
-    return ''.join('{:02x} '.format(ord(c)) for c in bytes)
+    if isinstance(bytes, basestring):
+        return ''.join('{:02x} '.format(ord(c)) for c in bytes)
+    if isinstance(bytes, bytearray):
+        return ''.join('{:02x} '.format(b) for b in bytes)
+    raise ValueError("Must pass bytesToHexString() a string or bytearray")
 
 IQS5xx_DEFAULT_ADDRESS = 0x74
 IQS5xx_MAX_ADDRESS = 0x78
@@ -107,9 +111,10 @@ class IQS5xx(object):
         self._readyPinNum = readyPin
         self._resetPin = OutputDevice(pin=self._resetPinNum, active_high=False, initial_value=True)
         self._readypin = DigitalInputDevice(pin=self._readyPinNum, active_state=True, pull_up=None)
-        self.releaseReset()
 
     def begin(self):
+        self.releaseReset()
+        time.sleep(0.01)
         self.waitUntilReady()
         self.acknowledgeReset()
         time.sleep(0.01)
@@ -163,7 +168,7 @@ class IQS5xx(object):
             mask = 1 << rxChannel
 
         value = mask if enabled else 0x00
-        self._device.writeByte_16BitAddress(registerAddy, value)
+        self._device.writeByte_16BitAddress(registerAddy, value, mask)
 
     def setTXRXChannelCount(self, tx_count, rx_count):
         assert 0 <= txChannel <= 15, "tx_count must be less or equal tp 15"
